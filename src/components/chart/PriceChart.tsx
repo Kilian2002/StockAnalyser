@@ -1,20 +1,27 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { createChart, IChartApi, CandlestickData } from "lightweight-charts";
+import { useEffect, useRef, useState } from "react";
+import { createChart, CandlestickSeries, UTCTimestamp } from "lightweight-charts";
 
-interface Props {
-  symbol: string;
+interface Candle {
+  time: UTCTimestamp;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
 }
 
-export default function PriceChart({ symbol }: Props) {
+export default function PriceChart({ symbol }: { symbol: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current) return;
+    setError(null);
+    setLoading(true);
 
-    chartRef.current = createChart(containerRef.current, {
+    const chart = createChart(containerRef.current, {
       layout: {
         background: { color: "#111827" },
         textColor: "#9ca3af",
@@ -27,7 +34,7 @@ export default function PriceChart({ symbol }: Props) {
       height: 380,
     });
 
-    const candleSeries = chartRef.current.addCandlestickSeries({
+    const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: "#22c55e",
       downColor: "#ef4444",
       borderVisible: false,
@@ -36,23 +43,46 @@ export default function PriceChart({ symbol }: Props) {
     });
 
     fetch(`/api/stocks/candles?symbol=${symbol}`)
-      .then((r) => r.json())
-      .then((data: CandlestickData[]) => {
-        if (Array.isArray(data)) candleSeries.setData(data);
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error ?? "Failed to load");
+        return data as Candle[];
+      })
+      .then((data) => {
+        if (data.length === 0) throw new Error("No data for this symbol");
+        candleSeries.setData(data);
+        chart.timeScale().fitContent();
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
       });
 
     const ro = new ResizeObserver(() => {
-      if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: containerRef.current.clientWidth });
-      }
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
     });
     ro.observe(containerRef.current);
 
     return () => {
       ro.disconnect();
-      chartRef.current?.remove();
+      chart.remove();
     };
   }, [symbol]);
 
-  return <div ref={containerRef} className="w-full rounded-lg overflow-hidden" />;
+  return (
+    <div className="relative w-full">
+      <div ref={containerRef} className="w-full rounded-lg overflow-hidden" />
+      {loading && !error && (
+        <div className="absolute inset-0 flex items-center justify-center" style={{ height: 380 }}>
+          <div className="h-6 w-6 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />
+        </div>
+      )}
+      {error && (
+        <div className="flex items-center justify-center text-sm text-red-400 py-8">
+          {error}
+        </div>
+      )}
+    </div>
+  );
 }
