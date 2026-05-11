@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 interface Holding {
   id: string;
@@ -19,20 +20,6 @@ interface PriceData {
   changePercent: number;
 }
 
-const STORAGE_KEY = "portfolio_holdings";
-
-function loadHoldings(): Holding[] {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
-
-function saveHoldings(h: Holding[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(h));
-}
-
 function fmt(n: number, decimals = 2) {
   return n.toLocaleString("de-DE", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
@@ -48,9 +35,19 @@ export default function PortfolioPage() {
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [valueVisible, setValueVisible] = useState(true);
   const [pricesVisible, setPricesVisible] = useState(true);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setHoldings(loadHoldings());
+    const supabase = createClient();
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (!user) return;
+      const { data } = await supabase
+        .from("portfolios")
+        .select("*")
+        .eq("user_id", user.id);
+      if (data) setHoldings(data as Holding[]);
+      setLoading(false);
+    });
   }, []);
 
   const fetchPrices = useCallback(async (h: Holding[]) => {
@@ -84,50 +81,61 @@ export default function PortfolioPage() {
     }
   }
 
-  function handleAdd() {
+  async function handleAdd() {
     if (!resolved || !shares) return;
-    const holding: Holding = {
-      id: crypto.randomUUID(),
-      symbol: resolved.symbol,
-      name: resolved.name,
-      isin: query.trim().toUpperCase(),
-      shares: parseFloat(shares),
-      type: resolved.type,
-      exchange: resolved.exchange,
-    };
-    const updated = [...holdings, holding];
-    setHoldings(updated);
-    saveHoldings(updated);
-    fetchPrices(updated);
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data, error } = await supabase
+      .from("portfolios")
+      .insert({
+        user_id: user.id,
+        symbol: resolved.symbol,
+        name: resolved.name,
+        isin: query.trim().toUpperCase(),
+        shares: parseFloat(shares),
+        type: resolved.type,
+        exchange: resolved.exchange,
+      })
+      .select()
+      .single();
+
+    if (!error && data) {
+      const updated = [...holdings, data as Holding];
+      setHoldings(updated);
+      fetchPrices(updated);
+    }
+
     setShowAdd(false);
     setQuery("");
     setShares("");
     setResolved(null);
   }
 
-  function handleRemove(id: string) {
-    const updated = holdings.filter((h) => h.id !== id);
-    setHoldings(updated);
-    saveHoldings(updated);
+  async function handleRemove(id: string) {
+    const supabase = createClient();
+    await supabase.from("portfolios").delete().eq("id", id);
+    setHoldings((prev) => prev.filter((h) => h.id !== id));
   }
 
-  function adjustShares(id: string, delta: number) {
-    const updated = holdings.map((h) => {
-      if (h.id !== id) return h;
-      const next = Math.max(0, parseFloat((h.shares + delta).toFixed(10)));
-      return { ...h, shares: next };
-    });
-    setHoldings(updated);
-    saveHoldings(updated);
+  async function adjustShares(id: string, delta: number) {
+    const holding = holdings.find((h) => h.id === id);
+    if (!holding) return;
+    const next = Math.max(0, parseFloat((holding.shares + delta).toFixed(10)));
+    const supabase = createClient();
+    await supabase.from("portfolios").update({ shares: next }).eq("id", id);
+    setHoldings((prev) => prev.map((h) => (h.id === id ? { ...h, shares: next } : h)));
   }
 
   const totalsByCurrency = holdings.reduce<Record<string, number>>((acc, h) => {
     const p = prices[h.symbol];
     if (!p) return acc;
-    const currency = p.currency;
-    acc[currency] = (acc[currency] ?? 0) + p.price * h.shares;
+    acc[p.currency] = (acc[p.currency] ?? 0) + p.price * h.shares;
     return acc;
   }, {});
+
+  if (loading) return <p className="text-gray-400">Loading portfolio...</p>;
 
   return (
     <div>
@@ -141,7 +149,6 @@ export default function PortfolioPage() {
         </button>
       </div>
 
-      {/* Total value */}
       {holdings.length > 0 && (
         <div className="mb-6 rounded-xl border border-gray-800 bg-gray-900 p-4">
           <div className="flex items-center justify-between mb-2">
@@ -170,7 +177,6 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {/* Holdings table */}
       {holdings.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 py-24 text-gray-500">
           <p>No positions yet.</p>
@@ -258,13 +264,10 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {/* Add position modal */}
       {showAdd && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 p-6">
             <h2 className="mb-4 text-lg font-semibold">Add Position</h2>
-
-            {/* ISIN/WKN input */}
             <div className="mb-3">
               <label className="mb-1 block text-xs text-gray-400">ISIN or WKN</label>
               <div className="flex gap-2">
@@ -284,8 +287,6 @@ export default function PortfolioPage() {
                 </button>
               </div>
             </div>
-
-            {/* Resolve result */}
             {resolveError && <p className="mb-3 text-sm text-red-400">{resolveError}</p>}
             {resolved && (
               <div className="mb-4 rounded-lg bg-gray-800 px-4 py-3">
@@ -293,8 +294,6 @@ export default function PortfolioPage() {
                 <p className="text-xs text-gray-400">{resolved.symbol} · {resolved.type} · {resolved.exchange}</p>
               </div>
             )}
-
-            {/* Shares input */}
             {resolved && (
               <div className="mb-4">
                 <label className="mb-1 block text-xs text-gray-400">Number of Shares</label>
@@ -309,7 +308,6 @@ export default function PortfolioPage() {
                 />
               </div>
             )}
-
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => { setShowAdd(false); setQuery(""); setShares(""); setResolved(null); setResolveError(null); }}
